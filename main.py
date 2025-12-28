@@ -33,7 +33,7 @@ def calculate():
         
         rate = get_btc_rate()
         sum_moment = amount * rate * 1.2
-        sum_delay = amount * rate * 1.1
+        sum_delay = amount * rate * 1.13
 
         return jsonify({
             "sum_moment": round(sum_moment),
@@ -125,4 +125,5 @@ def set_rate():
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
+
 
