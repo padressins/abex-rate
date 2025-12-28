@@ -58,8 +58,8 @@ def take_order():
         message_id = data.get('message_id')            # ID сообщения в группе
         manager_name = data.get('manager_name')        # Имя менеджера, нажавшего кнопку
 
-        if "|" in callback_data:
-            parts = callback_data.split("|")
+        if ":" in callback_data:
+            parts = callback_data.split(":")
             # Если это наш захват
             if parts[0] == "take":
                 client_username = parts[1]
@@ -125,3 +125,4 @@ def set_rate():
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
+
