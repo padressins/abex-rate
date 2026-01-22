@@ -30,11 +30,11 @@ def get_btc_rate():
     data = load_data(RATES_FILE, {"BTC": 7000000})
     return data.get("BTC", 7000000)
 
-# --- ЛОГИКА ПРОМОКОДОВ (Массовые + Анти-дюп) ---
+# --- ЛОГИКА ПРОМОКОДОВ ---
 
 @app.route('/add_promo', methods=['POST'])
 def add_promo():
-    """Админка: создание промокода (массовый, один код на много юзеров)"""
+    """Админка: создание промокода"""
     try:
         data = request.json
         code = str(data.get('promo_name', '')).strip().upper()
@@ -44,7 +44,6 @@ def add_promo():
             return jsonify({"success": False, "error": "Название кода пустое"}), 400
 
         promos = load_data(PROMOS_FILE, {})
-        # Инициализируем структуру, если кода еще нет, сохраняя старых юзеров если есть
         promos[code] = {
             "discount": discount,
             "used_by_users": promos.get(code, {}).get("used_by_users", [])
@@ -56,7 +55,7 @@ def add_promo():
 
 @app.route('/check_promo', methods=['POST'])
 def check_promo():
-    """Клиент: Проверка кода. ВСЕГДА возвращает discount (число), чтобы не ломать бота"""
+    """Клиент: Проверка кода с текстовыми маркерами для BotHunter"""
     try:
         data = request.json
         user_code = str(data.get('code', '')).strip().upper()
@@ -64,50 +63,47 @@ def check_promo():
 
         promos = load_data(PROMOS_FILE, {})
 
-        # Если код не найден
         if user_code not in promos:
             return jsonify({
                 "success": False, 
+                "status": "ERROR_NOT_FOUND",
                 "discount": 0, 
                 "message": "Промокод не найден"
             })
 
         promo = promos[user_code]
 
-        # Анти-дюп: проверка повторного использования
         if user_id in promo['used_by_users']:
             return jsonify({
                 "success": False, 
+                "status": "ERROR_USED",
                 "discount": 0, 
                 "message": "Вы уже использовали этот код"
             })
 
-        # Если всё честно — возвращаем сумму скидки
-        # ВАЖНО: Мы НЕ записываем юзера здесь, чтобы он мог пересчитать сумму 
-        # до момента финального подтверждения (или записываем сразу, если логика жесткая)
-        # Для твоей схемы запишем сразу:
+        # УСПЕХ: добавляем юзера в список и возвращаем SUCCESS_OK
         promo['used_by_users'].append(user_id)
         save_data(PROMOS_FILE, promos)
 
         return jsonify({
             "success": True, 
+            "status": "SUCCESS_OK", # Маркер для легкой проверки текста
             "discount": promo['discount'],
             "message": "Скидка применена!"
         })
     except Exception as e:
-        # Страховка: если что-то пошло не так, бот получит 0 и не "зависнет"
-        return jsonify({"success": False, "discount": 0, "error": str(e)})
+        return jsonify({"success": False, "status": "SERVER_ERROR", "discount": 0, "message": str(e)})
 
 # --- РАСЧЕТ И ЗАКАЗ ---
 
 @app.route('/calculate', methods=['POST'])
 def calculate():
-    """Финальный расчет сумм. Защищен от пустых полей discount"""
+    """Финальный расчет сумм. Защищен от пустых полей"""
     try:
         data = request.json
         amount = float(data.get('amount', 0))
         
-        # Получаем скидку. Если пришла пустота или ошибка — ставим 0
+        # Получаем скидку. Если ошибка в данных — ставим 0
         raw_discount = data.get('discount', 0)
         try:
             discount = float(raw_discount) if raw_discount else 0
@@ -116,7 +112,6 @@ def calculate():
         
         rate = get_btc_rate()
         
-        # Основная формула
         sum_moment = (amount * rate * 1.22) - discount
         sum_delay = (amount * rate * 1.18) - discount
 
