@@ -9,7 +9,7 @@ app = Flask(__name__)
 BOT_TOKEN = "8507683894:AAE3aYcTZ7kuvy2-mhDdzd8YAwfVe1LblG0" 
 MANAGER_GROUP_ID = "-1003636379042" 
 RATES_FILE = "rates.json"
-PROMOS_FILE = "promos.json" # Файл базы данных промокодов
+PROMOS_FILE = "promos.json"
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
@@ -30,30 +30,33 @@ def get_btc_rate():
     data = load_data(RATES_FILE, {"BTC": 7000000})
     return data.get("BTC", 7000000)
 
-# --- ЛОГИКА ПРОМОКОДОВ (Многоразовые + Анти-дюп) ---
+# --- ЛОГИКА ПРОМОКОДОВ (Массовые + Анти-дюп) ---
 
 @app.route('/add_promo', methods=['POST'])
 def add_promo():
-    """Админка: Гена создает промокод"""
+    """Админка: создание промокода (массовый, один код на много юзеров)"""
     try:
         data = request.json
-        code = str(data.get('promo_name')).strip().upper()
+        code = str(data.get('promo_name', '')).strip().upper()
         discount = int(data.get('promo_sum', 0))
         
+        if not code:
+            return jsonify({"success": False, "error": "Название кода пустое"}), 400
+
         promos = load_data(PROMOS_FILE, {})
-        # Создаем или обновляем код. used_by_users — список ID тех, кто его уже юзал.
+        # Инициализируем структуру, если кода еще нет, сохраняя старых юзеров если есть
         promos[code] = {
             "discount": discount,
             "used_by_users": promos.get(code, {}).get("used_by_users", [])
         }
         save_data(PROMOS_FILE, promos)
-        return jsonify({"success": True, "message": f"Промокод {code} на {discount}р активен"})
+        return jsonify({"success": True, "message": f"Промокод {code} активен"})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 400
 
 @app.route('/check_promo', methods=['POST'])
 def check_promo():
-    """Клиент: Проверка кода и защита от повторного использования"""
+    """Клиент: Проверка кода. ВСЕГДА возвращает discount (число), чтобы не ломать бота"""
     try:
         data = request.json
         user_code = str(data.get('code', '')).strip().upper()
@@ -61,43 +64,59 @@ def check_promo():
 
         promos = load_data(PROMOS_FILE, {})
 
-        # 1. Существует ли код?
+        # Если код не найден
         if user_code not in promos:
-            return jsonify({"success": False, "message": "Промокод не найден"})
+            return jsonify({
+                "success": False, 
+                "discount": 0, 
+                "message": "Промокод не найден"
+            })
 
         promo = promos[user_code]
 
-        # 2. АНТИ-ДЮП: Проверяем, не использовал ли ЭТОТ юзер ЭТОТ код ранее
+        # Анти-дюп: проверка повторного использования
         if user_id in promo['used_by_users']:
-            return jsonify({"success": False, "message": "Вы уже использовали этот промокод"})
+            return jsonify({
+                "success": False, 
+                "discount": 0, 
+                "message": "Вы уже использовали этот код"
+            })
 
-        # Если всё ОК — возвращаем скидку. 
-        # ВАЖНО: Мы записываем юзера в список использовавших ТОЛЬКО здесь.
+        # Если всё честно — возвращаем сумму скидки
+        # ВАЖНО: Мы НЕ записываем юзера здесь, чтобы он мог пересчитать сумму 
+        # до момента финального подтверждения (или записываем сразу, если логика жесткая)
+        # Для твоей схемы запишем сразу:
         promo['used_by_users'].append(user_id)
         save_data(PROMOS_FILE, promos)
 
         return jsonify({
             "success": True, 
             "discount": promo['discount'],
-            "message": f"Активировано! Скидка: {promo['discount']} руб."
+            "message": "Скидка применена!"
         })
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 400
+        # Страховка: если что-то пошло не так, бот получит 0 и не "зависнет"
+        return jsonify({"success": False, "discount": 0, "error": str(e)})
 
-# --- ОСНОВНЫЕ ФУНКЦИИ ОБМЕННИКА ---
+# --- РАСЧЕТ И ЗАКАЗ ---
 
 @app.route('/calculate', methods=['POST'])
 def calculate():
-    """Расчет итоговых сумм с комиссиями 22% и 18% за вычетом промокода"""
+    """Финальный расчет сумм. Защищен от пустых полей discount"""
     try:
         data = request.json
         amount = float(data.get('amount', 0))
-        # Скидка передается из BotHunter (либо результат check_promo, либо 0)
-        discount = float(data.get('discount', 0))
+        
+        # Получаем скидку. Если пришла пустота или ошибка — ставим 0
+        raw_discount = data.get('discount', 0)
+        try:
+            discount = float(raw_discount) if raw_discount else 0
+        except:
+            discount = 0
         
         rate = get_btc_rate()
         
-        # Математика: (Сумма * Курс * Комиссия) - Скидка
+        # Основная формула
         sum_moment = (amount * rate * 1.22) - discount
         sum_delay = (amount * rate * 1.18) - discount
 
@@ -125,7 +144,6 @@ def take_order():
                 client_username = parts[1]
                 amount = parts[2]
 
-                # Удаление кнопок в группе менеджеров
                 tg_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageReplyMarkup"
                 tg_payload = {
                     "chat_id": MANAGER_GROUP_ID,
@@ -138,16 +156,15 @@ def take_order():
                     "success": True,
                     "client_username": client_username,
                     "amount": amount,
-                    "manager_confirm": manager_name,
-                    "message": f"Заявка клиента @{client_username} захвачена!"
+                    "manager_confirm": manager_name
                 })
-        return jsonify({"success": False, "error": "Invalid data"}), 400
+        return jsonify({"success": False}), 400
     except Exception as e:
         return jsonify({"error": str(e), "success": False}), 400
 
 @app.route('/confirm', methods=['POST'])
 def confirm():
-    """Парсинг кнопок подтверждения оплаты"""
+    """Парсинг кнопок подтверждения"""
     try:
         data = request.json
         content = data.get('content', '')
@@ -159,13 +176,13 @@ def confirm():
                 "amount": parts[2] if len(parts) > 2 else "0",
                 "success": True
             })
-        return jsonify({"success": False, "error": "Invalid format"}), 400
+        return jsonify({"success": False}), 400
     except Exception as e:
         return jsonify({"error": str(e), "success": False}), 400
 
 @app.route('/set_rate', methods=['GET'])
 def set_rate():
-    """Обновление курса BTC админом"""
+    """Установка курса BTC"""
     try:
         new_rate = float(request.args.get('rate'))
         save_data(RATES_FILE, {"BTC": new_rate})
